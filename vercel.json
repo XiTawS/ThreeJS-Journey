@@ -1,7 +1,0 @@
-{
-  "buildCommand": "npm install && npm run build:all",
-  "outputDirectory": "dist",
-  "cleanUrls": true,
-  "trailingSlash": false
-}
-

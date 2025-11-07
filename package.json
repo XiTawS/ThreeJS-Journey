@@ -1,17 +1,8 @@
 {
-  "name": "threejs-journey-monorepo",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "generate:projects": "node scripts/generate-projects-list.js",
-    "dev": "npm run generate:projects && vite",
-    "build": "npm run generate:projects && vite build",
-    "build:all": "node scripts/build-all.js",
-    "preview": "vite preview"
+  "dependencies": {
+    "fs": "^0.0.1-security"
   },
-  "devDependencies": {
-    "vite": "^6.2.2"
+  "scripts": {
+    "predeploy" : "node scripts/generate-vercel-config.js"
   }
 }
-
