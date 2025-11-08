@@ -1,6 +1,6 @@
 import { execSync } from 'child_process'
 import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, cpSync } from 'fs'
-import { join, dirname, basename } from 'path'
+import { join, dirname, basename, extname } from 'path'
 import { fileURLToPath } from 'url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -89,6 +89,107 @@ function buildProject(project) {
   }
 }
 
+// Transformer les chemins absolus dans les fichiers JS pour qu'ils utilisent le base path
+function fixAbsolutePathsInJS(targetPath, basePath) {
+  try {
+    // Parcourir récursivement tous les fichiers JS dans le dossier target
+    const jsFiles = []
+    
+    function findJSFiles(dir) {
+      const entries = readdirSync(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          findJSFiles(fullPath)
+        } else if (entry.isFile() && extname(entry.name) === '.js') {
+          jsFiles.push(fullPath)
+        }
+      }
+    }
+    
+    findJSFiles(targetPath)
+    
+    let totalReplacements = 0
+    const basePathWithoutSlash = basePath.replace(/\/$/, '') // Enlever le trailing slash
+    
+    // Fonction helper pour vérifier si on doit skip le remplacement
+    function shouldSkipReplacement(content, match) {
+      const matchIndex = content.indexOf(match)
+      if (matchIndex > 0) {
+        const lineStart = content.lastIndexOf('\n', matchIndex) + 1
+        const lineBeforeMatch = content.substring(lineStart, matchIndex)
+        // Ne pas modifier les URLs complètes
+        if (lineBeforeMatch.includes('://') || lineBeforeMatch.trim().endsWith('//')) {
+          return true
+        }
+      }
+      return false
+    }
+    
+    // Dossiers d'assets courants à chercher
+    const assetFolders = ['textures', 'assets', 'static', 'images', 'media']
+    
+    for (const jsFile of jsFiles) {
+      let content = readFileSync(jsFile, 'utf-8')
+      const originalContent = content
+      
+      // Remplacer les chemins absolus qui pointent vers des assets statiques
+      // Pattern: '/textures/...' ou '/assets/...' etc.
+      // On évite de remplacer les chemins qui commencent déjà par le base path
+      // et on évite les URLs complètes (http://, https://, //)
+      
+      // Remplacer les chemins absolus '/textures/', '/assets/', etc. par leur équivalent avec base path
+      // On cherche les patterns dans les strings JavaScript (entre quotes)
+      for (const folder of assetFolders) {
+        // Pattern pour détecter '/textures/...' dans des strings
+        // On utilise trois patterns séparés pour chaque type de quote pour éviter les problèmes d'échappement
+        
+        // Pattern pour single quotes: '/textures/...'
+        const patternSingle = new RegExp("(['])\\/" + folder + "\\/([^'\\s\\n\\r]*)", 'g')
+        content = content.replace(patternSingle, (match, quote, path) => {
+          if (shouldSkipReplacement(content, match)) return match
+          if (path.startsWith(basePathWithoutSlash)) return match
+          totalReplacements++
+          return quote + basePathWithoutSlash + '/' + folder + '/' + path
+        })
+        
+        // Pattern pour double quotes: "/textures/..."
+        const patternDouble = new RegExp('(["])/' + folder + '/([^"\\s\\n\\r]*)', 'g')
+        content = content.replace(patternDouble, (match, quote, path) => {
+          if (shouldSkipReplacement(content, match)) return match
+          if (path.startsWith(basePathWithoutSlash)) return match
+          totalReplacements++
+          return quote + basePathWithoutSlash + '/' + folder + '/' + path
+        })
+        
+        // Pattern pour backticks: `/textures/...`
+        const patternBacktick = new RegExp('([`])/' + folder + '/([^`\\s\\n\\r]*)', 'g')
+        content = content.replace(patternBacktick, (match, quote, path) => {
+          if (shouldSkipReplacement(content, match)) return match
+          if (path.startsWith(basePathWithoutSlash)) return match
+          totalReplacements++
+          return quote + basePathWithoutSlash + '/' + folder + '/' + path
+        })
+      }
+      
+      // Écrire le fichier modifié si des changements ont été faits
+      if (content !== originalContent) {
+        writeFileSync(jsFile, content, 'utf-8')
+      }
+    }
+    
+    if (totalReplacements > 0) {
+      log(`  🔧 ${totalReplacements} chemin(s) absolu(s) corrigé(s) dans les fichiers JS`, 'green')
+      return true
+    }
+    
+    return false
+  } catch (error) {
+    log(`  ⚠️  Erreur lors de la correction des chemins: ${error.message}`, 'yellow')
+    return false
+  }
+}
+
 // Copier le build dans le dossier dist global
 function copyBuildToGlobalDist(project) {
   const projectDistPath = join(project.path, 'dist')
@@ -118,6 +219,23 @@ function copyBuildToGlobalDist(project) {
   cpSync(projectDistPath, targetPath, { recursive: true })
   log(`📁 Build copié dans ${targetPath.replace(__dirname, '.')}`, 'green')
   
+  // Corriger les chemins absolus dans les fichiers JS
+  fixAbsolutePathsInJS(targetPath, project.basePath)
+  
+  // Vérifier que les fichiers statiques sont bien présents
+  const texturesPath = join(targetPath, 'textures')
+  if (existsSync(texturesPath)) {
+    const textureFiles = readdirSync(texturesPath, { recursive: true })
+    const textureCount = textureFiles.filter(f => 
+      typeof f === 'string' && /\.(jpg|jpeg|png|gif|webp|hdr)$/i.test(f)
+    ).length
+    if (textureCount > 0) {
+      log(`  ✓ ${textureCount} texture(s) trouvée(s)`, 'green')
+    }
+  } else {
+    log(`  ⚠️  Aucun dossier textures trouvé pour ${project.name}`, 'yellow')
+  }
+  
   return true
 }
 
@@ -145,33 +263,85 @@ function createPublicDirectory() {
 
 // Générer vercel.json automatiquement
 function generateVercelConfig(projects) {
+  const routes = []
   const rewrites = []
   
-  // Pour chaque projet, créer un rewrite pour le SPA
-  // Vercel sert automatiquement les fichiers statiques s'ils existent
-  // Les rewrites ne s'appliquent que si le fichier n'existe pas
+  // Pour chaque projet
   for (const project of projects) {
     const basePathWithSlash = project.basePath
     const basePathWithoutSlash = basePathWithSlash.replace(/\/$/, '')
     
-    // Rewrite pour toutes les routes sous le basePath vers index.html
-    // Vercel servira automatiquement les fichiers statiques (.js, .css, .png, etc.) s'ils existent
-    rewrites.push({
-      source: `${basePathWithSlash}:path*`,
-      destination: `${basePathWithSlash}index.html`
+    // IMPORTANT: Les routes sont évaluées AVANT les rewrites
+    // On crée des routes explicites pour les fichiers statiques pour s'assurer qu'ils sont servis
+    // Les extensions de fichiers statiques courantes
+    const staticFilePattern = '\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr|mp4|webm|ogg|mp3|wav|flac|aac)$'
+    
+    // Route pour servir les fichiers statiques du projet (évaluée en premier)
+    routes.push({
+      src: `${basePathWithSlash}(.*${staticFilePattern})`,
+      dest: `${basePathWithSlash}$1`,
+      headers: {
+        'Cache-Control': 'public, max-age=31536000, immutable'
+      }
     })
     
-    // Rewrite pour le basePath lui-même (sans trailing slash)
+    // Route pour servir les textures spécifiquement (au cas où)
+    routes.push({
+      src: `${basePathWithSlash}textures/(.*)`,
+      dest: `${basePathWithSlash}textures/$1`,
+      headers: {
+        'Cache-Control': 'public, max-age=31536000, immutable'
+      }
+    })
+    
+    // Rewrite pour les routes sous le basePath, mais seulement pour les requêtes HTML
+    // Cela permet de servir les fichiers statiques normalement via les routes ci-dessus
+    rewrites.push({
+      source: `${basePathWithSlash}:path*`,
+      destination: `${basePathWithSlash}index.html`,
+      has: [
+        {
+          type: 'header',
+          key: 'accept',
+          value: 'text/html',
+        },
+      ],
+    })
+    
+    // Rewrite pour le basePath lui-même (sans trailing slash) - seulement pour HTML
     rewrites.push({
       source: basePathWithoutSlash,
-      destination: `${basePathWithSlash}index.html`
+      destination: `${basePathWithSlash}index.html`,
+      has: [
+        {
+          type: 'header',
+          key: 'accept',
+          value: 'text/html',
+        },
+      ],
     })
   }
   
-  // Rewrite pour la page d'index principale
+  // Route pour servir les fichiers statiques à la racine (index.html, etc.)
+  routes.push({
+    src: '/(.*\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr)$)',
+    dest: '/$1',
+    headers: {
+      'Cache-Control': 'public, max-age=31536000, immutable'
+    }
+  })
+  
+  // Rewrite pour la page d'index principale - seulement pour HTML
   rewrites.push({
     source: '/',
-    destination: '/index.html'
+    destination: '/index.html',
+    has: [
+      {
+        type: 'header',
+        key: 'accept',
+        value: 'text/html',
+      },
+    ],
   })
   
   const vercelConfig = {
@@ -186,6 +356,7 @@ function generateVercelConfig(projects) {
         }
       }
     ],
+    routes: routes,
     rewrites: rewrites
   }
   
@@ -194,7 +365,7 @@ function generateVercelConfig(projects) {
     JSON.stringify(vercelConfig, null, 2)
   )
   
-  log(`📝 vercel.json généré avec ${rewrites.length} rewrite(s)`, 'green')
+  log(`📝 vercel.json généré avec ${routes.length} route(s) et ${rewrites.length} rewrite(s)`, 'green')
 }
 
 // Créer une page d'index qui liste tous les projets
