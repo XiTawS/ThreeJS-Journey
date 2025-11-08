@@ -1,11 +1,14 @@
 {
-  "dependencies": {
-    "fs": "^0.0.1-security",
-    "path": "^0.12.7"
-  },
+  "name": "threejs-journey",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
   "scripts": {
-    "generate-vercel": "node generate-vercel.js",
-    "build": "npm run generate-vercel && npm run build:all",
-    "build:all": "for d in */ ; do if [ -f \"$d/vite.config.js\" ]; then cd \"$d\" && npm install && npm run build && cd ..; fi; done"
+    "build": "node build.js",
+    "vercel-build": "node build.js"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
