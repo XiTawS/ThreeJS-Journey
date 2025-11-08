@@ -121,6 +121,28 @@ function copyBuildToGlobalDist(project) {
   return true
 }
 
+// Créer un dossier public pour Vercel (certaines configurations Vercel cherchent public par défaut)
+function createPublicDirectory() {
+  const distPath = join(__dirname, 'dist')
+  const publicPath = join(__dirname, 'public')
+  
+  if (!existsSync(distPath)) {
+    log(`⚠️  Le dossier dist n'existe pas, impossible de créer public`, 'yellow')
+    return false
+  }
+  
+  // Supprimer public s'il existe
+  if (existsSync(publicPath)) {
+    rmSync(publicPath, { recursive: true, force: true })
+  }
+  
+  // Copier le contenu de dist dans public
+  cpSync(distPath, publicPath, { recursive: true })
+  log(`📁 Dossier public créé (copie de dist)`, 'green')
+  
+  return true
+}
+
 // Générer vercel.json automatiquement
 function generateVercelConfig(projects) {
   const rewrites = []
@@ -154,12 +176,13 @@ function generateVercelConfig(projects) {
   
   const vercelConfig = {
     version: 2,
+    outputDirectory: 'dist',
     builds: [
       {
         src: 'package.json',
         use: '@vercel/static-build',
         config: {
-          distDir: 'dist'
+          outputDirectory: 'dist'
         }
       }
     ],
@@ -331,6 +354,9 @@ async function main() {
   
   // Générer vercel.json
   generateVercelConfig(buildResults)
+  
+  // Créer un dossier public pour Vercel (au cas où)
+  createPublicDirectory()
   
   log(`\n✅ Build terminé! ${buildResults.length}/${projects.length} projet(s) buildé(s) avec succès\n`, 'green')
   
