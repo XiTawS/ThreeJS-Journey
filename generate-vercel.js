@@ -1,37 +1,25 @@
-import fs from 'fs'
-import path from 'path'
+const fs = require('fs');
+const path = require('path');
 
-const projectsDir = '.' // racine du repo
-const folders = fs.readdirSync(projectsDir).filter(f =>
-  fs.statSync(path.join(projectsDir, f)).isDirectory()
-)
+const rootDir = '.'; // racine du repo
 
-const builds = []
-const routes = []
+// Lis les dossiers dans la racine
+const projects = fs.readdirSync(rootDir, { withFileTypes: true })
+  .filter(dirent => dirent.isDirectory())
+  .filter(dirent => fs.existsSync(path.join(rootDir, dirent.name, 'vite.config.js'))) // on considère un dossier projet s'il contient vite.config.js
+  .map(dirent => dirent.name);
 
-folders.forEach(folder => {
-  const viteConfigPath = path.join(folder, 'vite.config.js')
-  const distDir = path.join(folder, 'dist')
+// Génère les règles de rewrite
+const rewrites = projects.map(name => ({
+  src: `/${name}/(.*)`,
+  dest: `${name}/dist/$1`
+}));
 
-  if (fs.existsSync(viteConfigPath)) {
-    builds.push({
-      src: viteConfigPath,
-      use: '@vercel/static-build',
-      config: { distDir }
-    })
-
-    routes.push({
-      src: `/${folder}/(.*)`,
-      dest: `${distDir}/$1`
-    })
-  }
-})
-
+// Écris le fichier vercel.json
 const vercelConfig = {
-  version: 3,
-  builds,
-  routes
-}
+  rewrites,
+};
 
-fs.writeFileSync('vercel.json', JSON.stringify(vercelConfig, null, 2))
-console.log('✅ vercel.json généré automatiquement !')
+fs.writeFileSync('vercel.json', JSON.stringify(vercelConfig, null, 2));
+
+console.log('vercel.json généré avec les projets :', projects);

@@ -2,5 +2,10 @@
   "dependencies": {
     "fs": "^0.0.1-security",
     "path": "^0.12.7"
+  },
+  "scripts": {
+    "generate-vercel": "node generate-vercel.js",
+    "build": "npm run generate-vercel && npm run build:all",
+    "build:all": "for d in */ ; do if [ -f \"$d/vite.config.js\" ]; then cd \"$d\" && npm install && npm run build && cd ..; fi; done"
   }
 }
