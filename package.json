@@ -1,8 +1,6 @@
 {
   "dependencies": {
-    "fs": "^0.0.1-security"
-  },
-  "scripts": {
-    "predeploy" : "node scripts/generate-vercel-config.js"
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
   }
 }
