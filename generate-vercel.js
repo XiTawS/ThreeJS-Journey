@@ -1,24 +1,28 @@
 const fs = require('fs');
 const path = require('path');
 
-const rootDir = '.'; // racine du repo
+const rootDir = '.';
 
-// Lis les dossiers dans la racine
+// Lis les dossiers contenant vite.config.js
 const projects = fs.readdirSync(rootDir, { withFileTypes: true })
   .filter(dirent => dirent.isDirectory())
-  .filter(dirent => fs.existsSync(path.join(rootDir, dirent.name, 'vite.config.js'))) // on considère un dossier projet s'il contient vite.config.js
+  .filter(dirent => fs.existsSync(path.join(rootDir, dirent.name, 'vite.config.js')))
   .map(dirent => dirent.name);
 
-// Génère les règles de rewrite
-const rewrites = projects.map(name => ({
-  source: `/${name}/(.*)`,
-  destination: `${name}/dist/$1`
-}));
+// Crée les routes pour servir chaque dist
+const routes = projects.flatMap(name => [
+  {
+    "source": `^/${name}/(.*)`,
+    "destination": `${name}/dist/$1`
+  },
+  {
+    "source": `^/${name}$`,
+    "destination": `${name}/dist/index.html`
+  }
+]);
 
-// Écris le fichier vercel.json
-const vercelConfig = {
-  rewrites,
-};
+// Écris le vercel.json
+const vercelConfig = { routes };
 
 fs.writeFileSync('vercel.json', JSON.stringify(vercelConfig, null, 2));
 
