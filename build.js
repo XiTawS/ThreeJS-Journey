@@ -368,149 +368,70 @@ function generateVercelConfig(projects) {
   log(`📝 vercel.json généré avec ${routes.length} route(s) et ${rewrites.length} rewrite(s)`, 'green')
 }
 
-// Créer une page d'index qui liste tous les projets
+// Créer une page d'index minimaliste avec l'arbre des projets
 function generateIndexPage(projects) {
   const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ThreeJS Journey</title>
+    <title>Arborescence des Projets</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: #0a0a0a;
-            color: #e5e5e5;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 3rem 1.5rem;
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 800px;
-            width: 100%;
-        }
-        header {
-            text-align: center;
-            margin-bottom: 4rem;
-        }
-        h1 {
-            font-size: 2.5rem;
-            font-weight: 300;
-            letter-spacing: -0.02em;
-            color: #ffffff;
-            margin-bottom: 0.5rem;
-        }
-        .subtitle {
-            font-size: 0.95rem;
-            color: #888;
-            font-weight: 400;
-        }
-        .projects-list {
-            display: flex;
-            flex-direction: column;
-            gap: 0.75rem;
-        }
-        .project-link {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 1.25rem 1.5rem;
-            background: #151515;
-            border: 1px solid #252525;
-            border-radius: 8px;
-            text-decoration: none;
-            color: #e5e5e5;
-            transition: all 0.2s ease;
-            position: relative;
-            overflow: hidden;
-        }
-        .project-link::before {
-            content: '';
-            position: absolute;
-            left: 0;
-            top: 0;
-            height: 100%;
-            width: 3px;
-            background: #6366f1;
-            transform: scaleY(0);
-            transition: transform 0.2s ease;
-        }
-        .project-link:hover {
-            background: #1a1a1a;
-            border-color: #333;
-            transform: translateX(4px);
-        }
-        .project-link:hover::before {
-            transform: scaleY(1);
-        }
-        .project-info {
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
-        }
-        .project-name {
-            font-size: 1rem;
-            font-weight: 500;
-            color: #ffffff;
-        }
-        .project-path {
-            font-size: 0.85rem;
-            color: #666;
-            font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
-        }
-        .project-arrow {
-            color: #666;
-            font-size: 1.2rem;
-            transition: transform 0.2s ease, color 0.2s ease;
-        }
-        .project-link:hover .project-arrow {
-            transform: translateX(4px);
-            color: #6366f1;
-        }
-        @media (max-width: 640px) {
-            h1 {
-                font-size: 2rem;
-            }
-            .project-link {
-                padding: 1rem 1.25rem;
-            }
-            .project-name {
-                font-size: 0.95rem;
-            }
-            .project-path {
-                font-size: 0.8rem;
-            }
-        }
+      body {
+        background: #181818;
+        color: #e5e5e5;
+        font-family: monospace;
+        margin: 0;
+        padding: 2rem;
+      }
+      h1 {
+        font-size: 1.7rem;
+        font-weight: 400;
+        margin-bottom: 1.7rem;
+        letter-spacing: -0.03em;
+      }
+      .tree {
+        list-style: none;
+        padding-left: 0;
+      }
+      .tree li {
+        margin: 0.4rem 0 0.4rem 1.1em;
+        position: relative;
+      }
+      .tree li:before {
+        content: '├──';
+        position: absolute;
+        left: -1.1em;
+        color: #888;
+      }
+      .tree li:last-child:before {
+        content: '└──';
+      }
+      a {
+        color: #a8ffe6;
+        text-decoration: none;
+        transition: color 0.15s;
+      }
+      a:hover {
+        color: #82aaff;
+        text-decoration: underline dotted;
+      }
+      @media (max-width:600px){
+        body { padding: 0.7rem; }
+        h1 { font-size: 1.15rem; }
+      }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>ThreeJS Journey</h1>
-            <p class="subtitle">${projects.length} project${projects.length > 1 ? 's' : ''}</p>
-        </header>
-        <nav class="projects-list">
-${projects.map(project => {
-  const displayName = project.name.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-  return `            <a href="${project.basePath}" class="project-link">
-                <div class="project-info">
-                    <span class="project-name">${displayName}</span>
-                    <span class="project-path">${project.basePath}</span>
-                </div>
-                <span class="project-arrow">→</span>
-            </a>`
-}).join('\n')}
-        </nav>
-    </div>
+    <h1>Arborescence des Projets (${projects.length})</h1>
+    <ul class="tree">
+${
+  projects.map((project, i) => {
+    const name = project.name;
+    return `      <li><a href="${project.basePath}">${name}</a></li>`;
+  }).join('\n')
+}
+    </ul>
 </body>
 </html>`
   
