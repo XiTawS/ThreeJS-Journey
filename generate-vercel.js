@@ -11,8 +11,8 @@ const projects = fs.readdirSync(rootDir, { withFileTypes: true })
 
 // Génère les règles de rewrite
 const rewrites = projects.map(name => ({
-  src: `/${name}/(.*)`,
-  dest: `${name}/dist/$1`
+  source: `/${name}/(.*)`,
+  destination: `${name}/dist/$1`
 }));
 
 // Écris le fichier vercel.json
