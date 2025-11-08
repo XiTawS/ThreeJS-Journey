@@ -9,12 +9,12 @@ const gui = new GUI({
     title: 'Nice debug UI',
     closeFolders: true,
 });
-gui.hide()
+// gui.hide()
     
-window.addEventListener('keydown', (e)=> {
-    if (e.key =='h')
-        gui.show(gui._hidden)
-})
+// window.addEventListener('keydown', (e)=> {
+//     if (e.key =='h')
+//         gui.show(gui._hidden)
+// })
 
 const debugObject = {}
 
