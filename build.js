@@ -411,6 +411,7 @@ function generateIndexPage(projects) {
         color: #a8ffe6;
         text-decoration: none;
         transition: color 0.15s;
+        margin: 1rem
       }
       a:hover {
         color: #82aaff;
