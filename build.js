@@ -1,12 +1,25 @@
 import { execSync } from 'child_process'
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, cpSync } from 'fs'
-import { join, dirname, basename, extname } from 'path'
+import { readdirSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, cpSync } from 'fs'
+import { join, dirname, extname } from 'path'
 import { fileURLToPath } from 'url'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// Couleurs pour les logs
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  distDir: join(__dirname, 'dist'),
+  publicDir: join(__dirname, 'public'),
+  port: 3000,
+}
+
+// ============================================================================
+// UTILITAIRES
+// ============================================================================
+
 const colors = {
   reset: '\x1b[0m',
   bright: '\x1b[1m',
@@ -20,44 +33,81 @@ function log(message, color = 'reset') {
   console.log(`${colors[color]}${message}${colors.reset}`)
 }
 
-// Détecter tous les projets Vite
+// ============================================================================
+// DÉTECTION DES PROJETS
+// ============================================================================
+
+/**
+ * Détecte tous les projets Vite récursivement dans les sous-dossiers
+ * @returns {Array} Liste des projets trouvés
+ */
 function findProjects() {
   const projects = []
-  const entries = readdirSync(__dirname, { withFileTypes: true })
   
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const viteConfigPath = join(__dirname, entry.name, 'vite.config.js')
-      const packageJsonPath = join(__dirname, entry.name, 'package.json')
-      
-      if (existsSync(viteConfigPath) && existsSync(packageJsonPath)) {
-        try {
-          const viteConfigContent = readFileSync(viteConfigPath, 'utf-8')
-          // Extraire le base path de la config
-          const baseMatch = viteConfigContent.match(/base\s*:\s*['"`]([^'"`]+)['"`]/)
-          const basePath = baseMatch ? baseMatch[1] : `/${entry.name}/`
-          // Normaliser le base path (ajouter les slashes si nécessaire)
-          const normalizedBase = basePath.startsWith('/') ? basePath : `/${basePath}`
-          const normalizedBaseWithTrailing = normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`
-          
-          projects.push({
-            name: entry.name,
-            path: join(__dirname, entry.name),
-            basePath: normalizedBaseWithTrailing,
-            viteConfigPath,
-            packageJsonPath
-          })
-        } catch (error) {
-          log(`⚠️  Erreur lors de la lecture de ${entry.name}: ${error.message}`, 'yellow')
+  function searchDirectory(dir, chapterName = null) {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const fullPath = join(dir, entry.name)
+        const viteConfigPath = join(fullPath, 'vite.config.js')
+        const packageJsonPath = join(fullPath, 'package.json')
+        
+        // Si c'est un projet Vite (a vite.config.js et package.json)
+        if (existsSync(viteConfigPath) && existsSync(packageJsonPath)) {
+          try {
+            const viteConfigContent = readFileSync(viteConfigPath, 'utf-8')
+            const baseMatch = viteConfigContent.match(/base\s*:\s*['"`]([^'"`]+)['"`]/)
+            const basePath = baseMatch ? baseMatch[1] : `/${entry.name}/`
+            const normalizedBase = basePath.startsWith('/') ? basePath : `/${basePath}`
+            const normalizedBaseWithTrailing = normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`
+            
+            projects.push({
+              name: entry.name,
+              chapter: chapterName,
+              path: fullPath,
+              basePath: normalizedBaseWithTrailing,
+              viteConfigPath,
+              packageJsonPath
+            })
+          } catch (error) {
+            log(`⚠️  Erreur lors de la lecture de ${entry.name}: ${error.message}`, 'yellow')
+          }
+        } else {
+          // Recherche récursive dans les dossiers chapitres
+          if (entry.name.startsWith('Chapter')) {
+            searchDirectory(fullPath, entry.name)
+          } else {
+            searchDirectory(fullPath, chapterName)
+          }
         }
       }
     }
   }
   
-  return projects.sort((a, b) => a.name.localeCompare(b.name))
+  searchDirectory(__dirname)
+  
+  return projects.sort((a, b) => {
+    if (a.chapter && b.chapter) {
+      if (a.chapter !== b.chapter) {
+        return a.chapter.localeCompare(b.chapter)
+      }
+    } else if (a.chapter) {
+      return -1
+    } else if (b.chapter) {
+      return 1
+    }
+    return a.name.localeCompare(b.name)
+  })
 }
 
-// Installer les dépendances d'un projet
+// ============================================================================
+// BUILD DES PROJETS
+// ============================================================================
+
+/**
+ * Installe les dépendances d'un projet
+ */
 function installDependencies(project) {
   log(`📦 Installation des dépendances pour ${project.name}...`, 'blue')
   try {
@@ -73,7 +123,9 @@ function installDependencies(project) {
   }
 }
 
-// Build un projet
+/**
+ * Build un projet
+ */
 function buildProject(project) {
   log(`🔨 Build de ${project.name}...`, 'blue')
   try {
@@ -89,10 +141,15 @@ function buildProject(project) {
   }
 }
 
-// Transformer les chemins absolus dans les fichiers JS pour qu'ils utilisent le base path
+// ============================================================================
+// CORRECTION DES CHEMINS
+// ============================================================================
+
+/**
+ * Corrige les chemins absolus dans les fichiers JS pour utiliser le base path
+ */
 function fixAbsolutePathsInJS(targetPath, basePath) {
   try {
-    // Parcourir récursivement tous les fichiers JS dans le dossier target
     const jsFiles = []
     
     function findJSFiles(dir) {
@@ -110,15 +167,14 @@ function fixAbsolutePathsInJS(targetPath, basePath) {
     findJSFiles(targetPath)
     
     let totalReplacements = 0
-    const basePathWithoutSlash = basePath.replace(/\/$/, '') // Enlever le trailing slash
+    const basePathWithoutSlash = basePath.replace(/\/$/, '')
+    const assetFolders = ['textures', 'assets', 'static', 'images', 'media']
     
-    // Fonction helper pour vérifier si on doit skip le remplacement
     function shouldSkipReplacement(content, match) {
       const matchIndex = content.indexOf(match)
       if (matchIndex > 0) {
         const lineStart = content.lastIndexOf('\n', matchIndex) + 1
         const lineBeforeMatch = content.substring(lineStart, matchIndex)
-        // Ne pas modifier les URLs complètes
         if (lineBeforeMatch.includes('://') || lineBeforeMatch.trim().endsWith('//')) {
           return true
         }
@@ -126,53 +182,27 @@ function fixAbsolutePathsInJS(targetPath, basePath) {
       return false
     }
     
-    // Dossiers d'assets courants à chercher
-    const assetFolders = ['textures', 'assets', 'static', 'images', 'media']
-    
     for (const jsFile of jsFiles) {
       let content = readFileSync(jsFile, 'utf-8')
       const originalContent = content
       
-      // Remplacer les chemins absolus qui pointent vers des assets statiques
-      // Pattern: '/textures/...' ou '/assets/...' etc.
-      // On évite de remplacer les chemins qui commencent déjà par le base path
-      // et on évite les URLs complètes (http://, https://, //)
-      
-      // Remplacer les chemins absolus '/textures/', '/assets/', etc. par leur équivalent avec base path
-      // On cherche les patterns dans les strings JavaScript (entre quotes)
       for (const folder of assetFolders) {
-        // Pattern pour détecter '/textures/...' dans des strings
-        // On utilise trois patterns séparés pour chaque type de quote pour éviter les problèmes d'échappement
+        const patterns = [
+          { regex: new RegExp("(['])\\/" + folder + "\\/([^'\\s\\n\\r]*)", 'g'), quote: "'" },
+          { regex: new RegExp('(["])/' + folder + '/([^"\\s\\n\\r]*)', 'g'), quote: '"' },
+          { regex: new RegExp('([`])/' + folder + '/([^`\\s\\n\\r]*)', 'g'), quote: '`' }
+        ]
         
-        // Pattern pour single quotes: '/textures/...'
-        const patternSingle = new RegExp("(['])\\/" + folder + "\\/([^'\\s\\n\\r]*)", 'g')
-        content = content.replace(patternSingle, (match, quote, path) => {
-          if (shouldSkipReplacement(content, match)) return match
-          if (path.startsWith(basePathWithoutSlash)) return match
-          totalReplacements++
-          return quote + basePathWithoutSlash + '/' + folder + '/' + path
-        })
-        
-        // Pattern pour double quotes: "/textures/..."
-        const patternDouble = new RegExp('(["])/' + folder + '/([^"\\s\\n\\r]*)', 'g')
-        content = content.replace(patternDouble, (match, quote, path) => {
-          if (shouldSkipReplacement(content, match)) return match
-          if (path.startsWith(basePathWithoutSlash)) return match
-          totalReplacements++
-          return quote + basePathWithoutSlash + '/' + folder + '/' + path
-        })
-        
-        // Pattern pour backticks: `/textures/...`
-        const patternBacktick = new RegExp('([`])/' + folder + '/([^`\\s\\n\\r]*)', 'g')
-        content = content.replace(patternBacktick, (match, quote, path) => {
-          if (shouldSkipReplacement(content, match)) return match
-          if (path.startsWith(basePathWithoutSlash)) return match
-          totalReplacements++
-          return quote + basePathWithoutSlash + '/' + folder + '/' + path
-        })
+        for (const { regex, quote } of patterns) {
+          content = content.replace(regex, (match, quoteChar, path) => {
+            if (shouldSkipReplacement(content, match)) return match
+            if (path.startsWith(basePathWithoutSlash)) return match
+            totalReplacements++
+            return quoteChar + basePathWithoutSlash + '/' + folder + '/' + path
+          })
+        }
       }
       
-      // Écrire le fichier modifié si des changements ont été faits
       if (content !== originalContent) {
         writeFileSync(jsFile, content, 'utf-8')
       }
@@ -180,196 +210,85 @@ function fixAbsolutePathsInJS(targetPath, basePath) {
     
     if (totalReplacements > 0) {
       log(`  🔧 ${totalReplacements} chemin(s) absolu(s) corrigé(s) dans les fichiers JS`, 'green')
-      return true
     }
     
-    return false
+    return totalReplacements > 0
   } catch (error) {
     log(`  ⚠️  Erreur lors de la correction des chemins: ${error.message}`, 'yellow')
     return false
   }
 }
 
-// Copier le build dans le dossier dist global
+// ============================================================================
+// COPIE ET ORGANISATION
+// ============================================================================
+
+/**
+ * Copie le build d'un projet dans le dossier dist global
+ */
 function copyBuildToGlobalDist(project) {
   const projectDistPath = join(project.path, 'dist')
-  const globalDistPath = join(__dirname, 'dist')
+  const globalDistPath = CONFIG.distDir
   
   if (!existsSync(projectDistPath)) {
     log(`⚠️  Aucun dossier dist trouvé pour ${project.name}`, 'yellow')
     return false
   }
   
-  // Créer le dossier dist global s'il n'existe pas
   if (!existsSync(globalDistPath)) {
     mkdirSync(globalDistPath, { recursive: true })
   }
   
-  // Le basePath détermine où copier les fichiers
-  // Par exemple, si basePath est /lesson3/, on copie dans dist/lesson3/
   const basePathParts = project.basePath.split('/').filter(p => p)
   const targetPath = join(globalDistPath, ...basePathParts)
   
-  // Supprimer le dossier de destination s'il existe
   if (existsSync(targetPath)) {
     rmSync(targetPath, { recursive: true, force: true })
   }
   
-  // Copier le contenu du dist du projet
   cpSync(projectDistPath, targetPath, { recursive: true })
   log(`📁 Build copié dans ${targetPath.replace(__dirname, '.')}`, 'green')
   
-  // Corriger les chemins absolus dans les fichiers JS
   fixAbsolutePathsInJS(targetPath, project.basePath)
-  
-  // Vérifier que les fichiers statiques sont bien présents
-  const texturesPath = join(targetPath, 'textures')
-  if (existsSync(texturesPath)) {
-    const textureFiles = readdirSync(texturesPath, { recursive: true })
-    const textureCount = textureFiles.filter(f => 
-      typeof f === 'string' && /\.(jpg|jpeg|png|gif|webp|hdr)$/i.test(f)
-    ).length
-    if (textureCount > 0) {
-      log(`  ✓ ${textureCount} texture(s) trouvée(s)`, 'green')
-    }
-  } else {
-    log(`  ⚠️  Aucun dossier textures trouvé pour ${project.name}`, 'yellow')
-  }
   
   return true
 }
 
-// Créer un dossier public pour Vercel (certaines configurations Vercel cherchent public par défaut)
+/**
+ * Crée un dossier public pour Vercel (copie de dist)
+ */
 function createPublicDirectory() {
-  const distPath = join(__dirname, 'dist')
-  const publicPath = join(__dirname, 'public')
-  
-  if (!existsSync(distPath)) {
+  if (!existsSync(CONFIG.distDir)) {
     log(`⚠️  Le dossier dist n'existe pas, impossible de créer public`, 'yellow')
     return false
   }
   
-  // Supprimer public s'il existe
-  if (existsSync(publicPath)) {
-    rmSync(publicPath, { recursive: true, force: true })
+  if (existsSync(CONFIG.publicDir)) {
+    rmSync(CONFIG.publicDir, { recursive: true, force: true })
   }
   
-  // Copier le contenu de dist dans public
-  cpSync(distPath, publicPath, { recursive: true })
+  cpSync(CONFIG.distDir, CONFIG.publicDir, { recursive: true })
   log(`📁 Dossier public créé (copie de dist)`, 'green')
-  
   return true
 }
 
-// Générer vercel.json automatiquement
-function generateVercelConfig(projects) {
-  const routes = []
-  const rewrites = []
-  
-  // Pour chaque projet
-  for (const project of projects) {
-    const basePathWithSlash = project.basePath
-    const basePathWithoutSlash = basePathWithSlash.replace(/\/$/, '')
-    
-    // IMPORTANT: Les routes sont évaluées AVANT les rewrites
-    // On crée des routes explicites pour les fichiers statiques pour s'assurer qu'ils sont servis
-    // Les extensions de fichiers statiques courantes
-    const staticFilePattern = '\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr|mp4|webm|ogg|mp3|wav|flac|aac)$'
-    
-    // Route pour servir les fichiers statiques du projet (évaluée en premier)
-    routes.push({
-      src: `${basePathWithSlash}(.*${staticFilePattern})`,
-      dest: `${basePathWithSlash}$1`,
-      headers: {
-        'Cache-Control': 'public, max-age=31536000, immutable'
-      }
-    })
-    
-    // Route pour servir les textures spécifiquement (au cas où)
-    routes.push({
-      src: `${basePathWithSlash}textures/(.*)`,
-      dest: `${basePathWithSlash}textures/$1`,
-      headers: {
-        'Cache-Control': 'public, max-age=31536000, immutable'
-      }
-    })
-    
-    // Rewrite pour les routes sous le basePath, mais seulement pour les requêtes HTML
-    // Cela permet de servir les fichiers statiques normalement via les routes ci-dessus
-    rewrites.push({
-      source: `${basePathWithSlash}:path*`,
-      destination: `${basePathWithSlash}index.html`,
-      has: [
-        {
-          type: 'header',
-          key: 'accept',
-          value: 'text/html',
-        },
-      ],
-    })
-    
-    // Rewrite pour le basePath lui-même (sans trailing slash) - seulement pour HTML
-    rewrites.push({
-      source: basePathWithoutSlash,
-      destination: `${basePathWithSlash}index.html`,
-      has: [
-        {
-          type: 'header',
-          key: 'accept',
-          value: 'text/html',
-        },
-      ],
-    })
-  }
-  
-  // Route pour servir les fichiers statiques à la racine (index.html, etc.)
-  routes.push({
-    src: '/(.*\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr)$)',
-    dest: '/$1',
-    headers: {
-      'Cache-Control': 'public, max-age=31536000, immutable'
-    }
-  })
-  
-  // Rewrite pour la page d'index principale - seulement pour HTML
-  rewrites.push({
-    source: '/',
-    destination: '/index.html',
-    has: [
-      {
-        type: 'header',
-        key: 'accept',
-        value: 'text/html',
-      },
-    ],
-  })
-  
-  const vercelConfig = {
-    version: 2,
-    outputDirectory: 'dist',
-    builds: [
-      {
-        src: 'package.json',
-        use: '@vercel/static-build',
-        config: {
-          outputDirectory: 'dist'
-        }
-      }
-    ],
-    routes: routes,
-    rewrites: rewrites
-  }
-  
-  writeFileSync(
-    join(__dirname, 'vercel.json'),
-    JSON.stringify(vercelConfig, null, 2)
-  )
-  
-  log(`📝 vercel.json généré avec ${routes.length} route(s) et ${rewrites.length} rewrite(s)`, 'green')
-}
+// ============================================================================
+// GÉNÉRATION DE LA PAGE D'INDEX
+// ============================================================================
 
-// Créer une page d'index minimaliste avec l'arbre des projets
+/**
+ * Génère la page d'index HTML avec l'arborescence des projets
+ */
 function generateIndexPage(projects) {
+  const projectsByChapter = {}
+  projects.forEach(project => {
+    const chapter = project.chapter || 'Autres'
+    if (!projectsByChapter[chapter]) {
+      projectsByChapter[chapter] = []
+    }
+    projectsByChapter[chapter].push(project)
+  })
+  
   const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -377,34 +296,56 @@ function generateIndexPage(projects) {
     <title>Arborescence des Projets</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
+      * {
+        box-sizing: border-box;
+      }
       body {
         background: #181818;
         color: #e5e5e5;
-        font-family: monospace;
+        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
         margin: 0;
         padding: 2rem;
+        line-height: 1.8;
       }
       h1 {
         font-size: 1.7rem;
         font-weight: 400;
-        margin-bottom: 1.7rem;
+        margin-bottom: 2rem;
         letter-spacing: -0.03em;
+        color: #e5e5e5;
       }
-      .tree {
-        list-style: none;
+      .chapters-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+        gap: 3rem;
+      }
+      .chapter {
+        display: flex;
+        flex-direction: column;
+      }
+      .chapter-title {
+        font-size: 1.5rem;
+        font-weight: 400;
+        margin-bottom: 1rem;
+        color: #a8ffe6;
         padding-left: 0;
       }
-      .tree li {
-        margin: 0.4rem 0 0.4rem 1.1em;
+      .projects-list {
+        list-style: none;
+        padding-left: 0;
+        margin: 0;
+      }
+      .projects-list li {
+        margin: 0.5rem 0 0.5rem 1.1em;
         position: relative;
       }
-      .tree li:before {
+      .projects-list li:before {
         content: '├──';
         position: absolute;
         left: -1.1em;
-        color: #888;
+        color: #666;
       }
-      .tree li:last-child:before {
+      .projects-list li:last-child:before {
         content: '└──';
       }
       a {
@@ -417,47 +358,164 @@ function generateIndexPage(projects) {
         color: #82aaff;
         text-decoration: underline dotted;
       }
-      @media (max-width:600px){
-        body { padding: 0.7rem; }
-        h1 { font-size: 1.15rem; }
+      @media (max-width: 768px) {
+        body {
+          padding: 1rem;
+        }
+        h1 {
+          font-size: 1.3rem;
+          margin-bottom: 1.5rem;
+        }
+        .chapters-container {
+          grid-template-columns: 1fr;
+          gap: 2rem;
+        }
+        .chapter-title {
+          font-size: 1.3rem;
+        }
       }
     </style>
 </head>
 <body>
-    <h1>Arborescence des Projets (${projects.length})</h1>
-    <ul class="tree">
+    <h1>Three.js Journey - Projets (${projects.length})</h1>
+    <div class="chapters-container">
 ${
-  projects.map((project, i) => {
-    const name = project.name;
-    return `      <li><a href="${project.basePath}">${name}</a></li>`;
-  }).join('\n')
+  Object.entries(projectsByChapter).map(([chapter, chapterProjects]) => `
+      <div class="chapter">
+        <h2 class="chapter-title">${chapter}</h2>
+        <ul class="projects-list">
+${
+  chapterProjects.map(project => `
+          <li><a href="${project.basePath}">${project.name}</a></li>
+`).join('')
 }
-    </ul>
+        </ul>
+      </div>
+`).join('')
+}
+    </div>
 </body>
 </html>`
   
-  const distPath = join(__dirname, 'dist')
-  if (!existsSync(distPath)) {
-    mkdirSync(distPath, { recursive: true })
+  if (!existsSync(CONFIG.distDir)) {
+    mkdirSync(CONFIG.distDir, { recursive: true })
   }
   
-  writeFileSync(join(distPath, 'index.html'), html)
+  writeFileSync(join(CONFIG.distDir, 'index.html'), html)
   log(`📄 Page d'index générée`, 'green')
 }
 
-// Fonction principale
-async function main() {
+// ============================================================================
+// CONFIGURATION VERCEL
+// ============================================================================
+
+/**
+ * Génère le fichier vercel.json pour le déploiement
+ */
+function generateVercelConfig(projects) {
+  const routes = []
+  const rewrites = []
+  const staticFilePattern = '\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr|mp4|webm|ogg|mp3|wav|flac|aac)$'
+  
+  for (const project of projects) {
+    const basePathWithSlash = project.basePath
+    const basePathWithoutSlash = basePathWithSlash.replace(/\/$/, '')
+    
+    routes.push({
+      src: `${basePathWithSlash}(.*${staticFilePattern})`,
+      dest: `${basePathWithSlash}$1`,
+      headers: {
+        'Cache-Control': 'public, max-age=31536000, immutable'
+      }
+    })
+    
+    routes.push({
+      src: `${basePathWithSlash}textures/(.*)`,
+      dest: `${basePathWithSlash}textures/$1`,
+      headers: {
+        'Cache-Control': 'public, max-age=31536000, immutable'
+      }
+    })
+    
+    rewrites.push({
+      source: `${basePathWithSlash}:path*`,
+      destination: `${basePathWithSlash}index.html`,
+      has: [{
+        type: 'header',
+        key: 'accept',
+        value: 'text/html',
+      }],
+    })
+    
+    rewrites.push({
+      source: basePathWithoutSlash,
+      destination: `${basePathWithSlash}index.html`,
+      has: [{
+        type: 'header',
+        key: 'accept',
+        value: 'text/html',
+      }],
+    })
+  }
+  
+  routes.push({
+    src: `/(.*${staticFilePattern})`,
+    dest: '/$1',
+    headers: {
+      'Cache-Control': 'public, max-age=31536000, immutable'
+    }
+  })
+  
+  rewrites.push({
+    source: '/',
+    destination: '/index.html',
+    has: [{
+      type: 'header',
+      key: 'accept',
+      value: 'text/html',
+    }],
+  })
+  
+  const vercelConfig = {
+    version: 2,
+    outputDirectory: 'dist',
+    builds: [{
+      src: 'package.json',
+      use: '@vercel/static-build',
+      config: {
+        outputDirectory: 'dist'
+      }
+    }],
+    routes,
+    rewrites
+  }
+  
+  writeFileSync(
+    join(__dirname, 'vercel.json'),
+    JSON.stringify(vercelConfig, null, 2)
+  )
+  
+  log(`📝 vercel.json généré avec ${routes.length} route(s) et ${rewrites.length} rewrite(s)`, 'green')
+}
+
+// ============================================================================
+// FONCTIONS PRINCIPALES
+// ============================================================================
+
+/**
+ * Build complet de tous les projets
+ */
+async function buildAll() {
   log('\n🚀 Démarrage du build automatique...\n', 'bright')
   
-  // Nettoyer le dossier dist global
-  const globalDistPath = join(__dirname, 'dist')
-  if (existsSync(globalDistPath)) {
+  // Nettoyer le dossier dist
+  if (existsSync(CONFIG.distDir)) {
     log('🧹 Nettoyage du dossier dist...', 'blue')
-    rmSync(globalDistPath, { recursive: true, force: true })
+    rmSync(CONFIG.distDir, { recursive: true, force: true })
   }
-  mkdirSync(globalDistPath, { recursive: true })
+  mkdirSync(CONFIG.distDir, { recursive: true })
   
-  // Détecter tous les projets
+  // Détecter les projets
   log('🔍 Détection des projets...', 'blue')
   const projects = findProjects()
   log(`✅ ${projects.length} projet(s) trouvé(s)\n`, 'green')
@@ -467,7 +525,7 @@ async function main() {
     process.exit(1)
   }
   
-  // Afficher la liste des projets
+  // Afficher la liste
   projects.forEach(project => {
     log(`  - ${project.name} (${project.basePath})`, 'blue')
   })
@@ -478,34 +536,24 @@ async function main() {
   for (const project of projects) {
     log(`\n📦 Traitement de ${project.name}...`, 'bright')
     
-    // Installer les dépendances
-    const installSuccess = installDependencies(project)
-    if (!installSuccess) {
+    if (!installDependencies(project)) {
       log(`⚠️  Passage au projet suivant...`, 'yellow')
       continue
     }
     
-    // Build le projet
-    const buildSuccess = buildProject(project)
-    if (!buildSuccess) {
+    if (!buildProject(project)) {
       log(`⚠️  Passage au projet suivant...`, 'yellow')
       continue
     }
     
-    // Copier le build dans le dist global
-    const copySuccess = copyBuildToGlobalDist(project)
-    if (copySuccess) {
+    if (copyBuildToGlobalDist(project)) {
       buildResults.push(project)
     }
   }
   
-  // Générer la page d'index
+  // Générer les fichiers finaux
   generateIndexPage(buildResults)
-  
-  // Générer vercel.json
   generateVercelConfig(buildResults)
-  
-  // Créer un dossier public pour Vercel (au cas où)
   createPublicDirectory()
   
   log(`\n✅ Build terminé! ${buildResults.length}/${projects.length} projet(s) buildé(s) avec succès\n`, 'green')
@@ -515,9 +563,47 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  log(`\n❌ Erreur fatale: ${error.message}`, 'red')
-  console.error(error)
-  process.exit(1)
-})
+/**
+ * Génère uniquement la page HTML (sans builder les projets)
+ */
+async function generateHTMLOnly() {
+  log('\n📄 Génération de la page HTML uniquement...\n', 'bright')
+  
+  if (!existsSync(CONFIG.distDir)) {
+    mkdirSync(CONFIG.distDir, { recursive: true })
+  }
+  
+  log('🔍 Détection des projets...', 'blue')
+  const projects = findProjects()
+  log(`✅ ${projects.length} projet(s) trouvé(s)\n`, 'green')
+  
+  if (projects.length === 0) {
+    log('❌ Aucun projet trouvé!', 'red')
+    process.exit(1)
+  }
+  
+  generateIndexPage(projects)
+  
+  log(`\n✅ Page HTML générée dans dist/index.html\n`, 'green')
+  log(`💡 Pour tester: npm run serve\n`, 'blue')
+}
 
+// ============================================================================
+// POINT D'ENTRÉE
+// ============================================================================
+
+const isHTMLOnly = process.argv.includes('--html-only')
+
+if (isHTMLOnly) {
+  generateHTMLOnly().catch(error => {
+    log(`\n❌ Erreur: ${error.message}`, 'red')
+    console.error(error)
+    process.exit(1)
+  })
+} else {
+  buildAll().catch(error => {
+    log(`\n❌ Erreur fatale: ${error.message}`, 'red')
+    console.error(error)
+    process.exit(1)
+  })
+}
