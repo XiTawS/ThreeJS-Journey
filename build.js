@@ -1,8 +1,11 @@
-import { execSync } from 'child_process'
+import { exec } from 'child_process'
 import { readdirSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, cpSync } from 'fs'
 import { join, dirname, extname } from 'path'
 import { fileURLToPath } from 'url'
+import { promisify } from 'util'
+import { cpus } from 'os'
 
+const execAsync = promisify(exec)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
@@ -13,8 +16,12 @@ const __dirname = dirname(__filename)
 const CONFIG = {
   distDir: join(__dirname, 'dist'),
   publicDir: join(__dirname, 'public'),
-  port: 3000,
+  concurrency: Math.max(1, Math.min(cpus().length, 4)), // Max 4 pour éviter surcharge I/O
 }
+
+const args = process.argv.slice(2)
+const FORCE_INSTALL = args.includes('--force') || args.includes('-f')
+const HTML_ONLY = args.includes('--html-only')
 
 // ============================================================================
 // UTILITAIRES
@@ -27,33 +34,62 @@ const colors = {
   yellow: '\x1b[33m',
   blue: '\x1b[34m',
   red: '\x1b[31m',
+  gray: '\x1b[90m',
 }
 
 function log(message, color = 'reset') {
   console.log(`${colors[color]}${message}${colors.reset}`)
 }
 
+/**
+ * Exécute une commande de manière asynchrone sans polluer la sortie standard
+ */
+async function runCommand(command, cwd) {
+  try {
+    const { stdout, stderr } = await execAsync(command, { cwd })
+    return { success: true, stdout, stderr }
+  } catch (error) {
+    return { success: false, stdout: error.stdout, stderr: error.stderr, error }
+  }
+}
+
+/**
+ * Helper pour exécuter des tâches en parallèle avec une limite de concurrence
+ */
+async function runConcurrent(items, fn, limit) {
+  const customLimit = Math.min(items.length, limit)
+  const queue = [...items]
+  const results = []
+
+  async function worker() {
+    while (queue.length > 0) {
+      const item = queue.shift()
+      const result = await fn(item)
+      results.push(result)
+    }
+  }
+
+  const workers = Array(customLimit).fill(null).map(() => worker())
+  await Promise.all(workers)
+  return results
+}
+
 // ============================================================================
 // DÉTECTION DES PROJETS
 // ============================================================================
 
-/**
- * Détecte tous les projets Vite récursivement dans les sous-dossiers
- * @returns {Array} Liste des projets trouvés
- */
 function findProjects() {
   const projects = []
-  
+
   function searchDirectory(dir, chapterName = null) {
     const entries = readdirSync(dir, { withFileTypes: true })
-    
+
     for (const entry of entries) {
       if (entry.isDirectory()) {
         const fullPath = join(dir, entry.name)
         const viteConfigPath = join(fullPath, 'vite.config.js')
         const packageJsonPath = join(fullPath, 'package.json')
-        
-        // Si c'est un projet Vite (a vite.config.js et package.json)
+
         if (existsSync(viteConfigPath) && existsSync(packageJsonPath)) {
           try {
             const viteConfigContent = readFileSync(viteConfigPath, 'utf-8')
@@ -61,7 +97,7 @@ function findProjects() {
             const basePath = baseMatch ? baseMatch[1] : `/${entry.name}/`
             const normalizedBase = basePath.startsWith('/') ? basePath : `/${basePath}`
             const normalizedBaseWithTrailing = normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`
-            
+
             projects.push({
               name: entry.name,
               chapter: chapterName,
@@ -71,10 +107,9 @@ function findProjects() {
               packageJsonPath
             })
           } catch (error) {
-            log(`⚠️  Erreur lors de la lecture de ${entry.name}: ${error.message}`, 'yellow')
+            log(`⚠️  Erreur lecture ${entry.name}: ${error.message}`, 'yellow')
           }
         } else {
-          // Recherche récursive dans les dossiers chapitres
           if (entry.name.startsWith('Chapter')) {
             searchDirectory(fullPath, entry.name)
           } else {
@@ -84,526 +119,256 @@ function findProjects() {
       }
     }
   }
-  
+
   searchDirectory(__dirname)
-  
+
   return projects.sort((a, b) => {
-    if (a.chapter && b.chapter) {
-      if (a.chapter !== b.chapter) {
-        return a.chapter.localeCompare(b.chapter)
-      }
-    } else if (a.chapter) {
-      return -1
-    } else if (b.chapter) {
-      return 1
+    if (a.chapter && b.chapter && a.chapter !== b.chapter) {
+      return a.chapter.localeCompare(b.chapter)
     }
     return a.name.localeCompare(b.name)
   })
 }
 
 // ============================================================================
-// BUILD DES PROJETS
+// LOGIQUE DE BUILD
 // ============================================================================
 
-/**
- * Installe les dépendances d'un projet
- */
-function installDependencies(project) {
-  log(`📦 Installation des dépendances pour ${project.name}...`, 'blue')
-  try {
-    execSync('npm install', {
-      cwd: project.path,
-      stdio: 'inherit'
-    })
-    log(`✅ Dépendances installées pour ${project.name}`, 'green')
-    return true
-  } catch (error) {
-    log(`❌ Erreur lors de l'installation des dépendances pour ${project.name}`, 'red')
-    return false
+async function processProject(project) {
+  const start = Date.now()
+  let skippedInstall = false
+
+  // 1. Installation des dépendances
+  const nodeModulesPath = join(project.path, 'node_modules')
+  if (!FORCE_INSTALL && existsSync(nodeModulesPath)) {
+    skippedInstall = true
+  } else {
+    // Si force install, on supprime node_modules pour être sûr
+    if (FORCE_INSTALL && existsSync(nodeModulesPath)) {
+      rmSync(nodeModulesPath, { recursive: true, force: true })
+    }
+
+    const installResult = await runCommand('npm install', project.path)
+    if (!installResult.success) {
+      log(`❌ ${project.name} - Échec install`, 'red')
+      console.error(installResult.stderr)
+      return { project, success: false, step: 'install' }
+    }
   }
+
+  // 2. Build
+  const buildResult = await runCommand('npm run build', project.path)
+  if (!buildResult.success) {
+    log(`❌ ${project.name} - Échec build`, 'red')
+    console.error(buildResult.stderr)
+    return { project, success: false, step: 'build' }
+  }
+
+  // 3. Copy & Fix Paths
+  try {
+    copyBuildToGlobalDist(project)
+  } catch (error) {
+    log(`❌ ${project.name} - Échec copy: ${error.message}`, 'red')
+    return { project, success: false, step: 'copy' }
+  }
+
+  const duration = ((Date.now() - start) / 1000).toFixed(1)
+  const installMsg = skippedInstall ? '⚡️' : '📦'
+  log(`✅ ${project.name} (${installMsg} ${duration}s)`, 'green')
+
+  return { project, success: true }
 }
 
-/**
- * Build un projet
- */
-function buildProject(project) {
-  log(`🔨 Build de ${project.name}...`, 'blue')
-  try {
-    execSync('npm run build', {
-      cwd: project.path,
-      stdio: 'inherit'
-    })
-    log(`✅ Build réussi pour ${project.name}`, 'green')
-    return true
-  } catch (error) {
-    log(`❌ Erreur lors du build de ${project.name}`, 'red')
-    return false
-  }
-}
-
-// ============================================================================
-// CORRECTION DES CHEMINS
-// ============================================================================
-
-/**
- * Corrige les chemins absolus dans les fichiers JS pour utiliser le base path
- */
 function fixAbsolutePathsInJS(targetPath, basePath) {
-  try {
-    const jsFiles = []
-    
-    function findJSFiles(dir) {
-      const entries = readdirSync(dir, { withFileTypes: true })
-      for (const entry of entries) {
-        const fullPath = join(dir, entry.name)
-        if (entry.isDirectory()) {
-          findJSFiles(fullPath)
-        } else if (entry.isFile() && extname(entry.name) === '.js') {
-          jsFiles.push(fullPath)
-        }
+  const jsFiles = []
+
+  function findJSFiles(dir) {
+    const entries = readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        findJSFiles(fullPath)
+      } else if (entry.isFile() && extname(entry.name) === '.js') {
+        jsFiles.push(fullPath)
       }
     }
-    
-    findJSFiles(targetPath)
-    
-    let totalReplacements = 0
-    const basePathWithoutSlash = basePath.replace(/\/$/, '')
-    const assetFolders = ['textures', 'assets', 'static', 'images', 'media']
-    
-    function shouldSkipReplacement(content, match) {
-      const matchIndex = content.indexOf(match)
-      if (matchIndex > 0) {
-        const lineStart = content.lastIndexOf('\n', matchIndex) + 1
-        const lineBeforeMatch = content.substring(lineStart, matchIndex)
-        if (lineBeforeMatch.includes('://') || lineBeforeMatch.trim().endsWith('//')) {
-          return true
-        }
-      }
-      return false
-    }
-    
-    for (const jsFile of jsFiles) {
-      let content = readFileSync(jsFile, 'utf-8')
-      const originalContent = content
-      
-      for (const folder of assetFolders) {
-        const patterns = [
-          { regex: new RegExp("(['])\\/" + folder + "\\/([^'\\s\\n\\r]*)", 'g'), quote: "'" },
-          { regex: new RegExp('(["])/' + folder + '/([^"\\s\\n\\r]*)', 'g'), quote: '"' },
-          { regex: new RegExp('([`])/' + folder + '/([^`\\s\\n\\r]*)', 'g'), quote: '`' }
-        ]
-        
-        for (const { regex, quote } of patterns) {
-          content = content.replace(regex, (match, quoteChar, path) => {
-            if (shouldSkipReplacement(content, match)) return match
-            if (path.startsWith(basePathWithoutSlash)) return match
-            totalReplacements++
-            return quoteChar + basePathWithoutSlash + '/' + folder + '/' + path
-          })
-        }
-      }
-      
-      if (content !== originalContent) {
-        writeFileSync(jsFile, content, 'utf-8')
+  }
+
+  findJSFiles(targetPath)
+
+  const basePathWithoutSlash = basePath.replace(/\/$/, '')
+  const assetFolders = ['textures', 'assets', 'static', 'images', 'media']
+
+  for (const jsFile of jsFiles) {
+    let content = readFileSync(jsFile, 'utf-8')
+    const originalContent = content
+
+    for (const folder of assetFolders) {
+      // Regex optimisée pour éviter les faux positifs (http://, etc.)
+      const patterns = [
+        { regex: new RegExp("(['])\\/" + folder + "\\/([^'\\s\\n\\r]*)", 'g') },
+        { regex: new RegExp('(["])/' + folder + '/([^"\\s\\n\\r]*)', 'g') },
+        { regex: new RegExp('([`])/' + folder + '/([^`\\s\\n\\r]*)', 'g') }
+      ]
+
+      for (const { regex } of patterns) {
+        content = content.replace(regex, (match, quote, path) => {
+          // Check simple pour éviter les URLs complètes
+          const index = match.indexOf('//')
+          if (index > -1 && index < match.indexOf(folder)) return match
+
+          if (path.startsWith(basePathWithoutSlash)) return match
+          return quote + basePathWithoutSlash + '/' + folder + '/' + path
+        })
       }
     }
-    
-    if (totalReplacements > 0) {
-      log(`  🔧 ${totalReplacements} chemin(s) absolu(s) corrigé(s) dans les fichiers JS`, 'green')
+
+    if (content !== originalContent) {
+      writeFileSync(jsFile, content, 'utf-8')
     }
-    
-    return totalReplacements > 0
-  } catch (error) {
-    log(`  ⚠️  Erreur lors de la correction des chemins: ${error.message}`, 'yellow')
-    return false
   }
 }
 
-// ============================================================================
-// COPIE ET ORGANISATION
-// ============================================================================
-
-/**
- * Copie le build d'un projet dans le dossier dist global
- */
 function copyBuildToGlobalDist(project) {
   const projectDistPath = join(project.path, 'dist')
-  const globalDistPath = CONFIG.distDir
-  
-  if (!existsSync(projectDistPath)) {
-    log(`⚠️  Aucun dossier dist trouvé pour ${project.name}`, 'yellow')
-    return false
-  }
-  
-  if (!existsSync(globalDistPath)) {
-    mkdirSync(globalDistPath, { recursive: true })
-  }
-  
+  if (!existsSync(projectDistPath)) throw new Error('Dossier dist introuvable')
+
   const basePathParts = project.basePath.split('/').filter(p => p)
-  const targetPath = join(globalDistPath, ...basePathParts)
-  
-  if (existsSync(targetPath)) {
-    rmSync(targetPath, { recursive: true, force: true })
-  }
-  
+  const targetPath = join(CONFIG.distDir, ...basePathParts)
+
+  if (existsSync(targetPath)) rmSync(targetPath, { recursive: true, force: true })
+
   cpSync(projectDistPath, targetPath, { recursive: true })
-  log(`📁 Build copié dans ${targetPath.replace(__dirname, '.')}`, 'green')
-  
   fixAbsolutePathsInJS(targetPath, project.basePath)
-  
-  return true
-}
-
-/**
- * Crée un dossier public pour Vercel (copie de dist)
- */
-function createPublicDirectory() {
-  if (!existsSync(CONFIG.distDir)) {
-    log(`⚠️  Le dossier dist n'existe pas, impossible de créer public`, 'yellow')
-    return false
-  }
-  
-  if (existsSync(CONFIG.publicDir)) {
-    rmSync(CONFIG.publicDir, { recursive: true, force: true })
-  }
-  
-  cpSync(CONFIG.distDir, CONFIG.publicDir, { recursive: true })
-  log(`📁 Dossier public créé (copie de dist)`, 'green')
-  return true
 }
 
 // ============================================================================
-// GÉNÉRATION DE LA PAGE D'INDEX
+// GÉNÉRATION FICHIERS STATIQUES
 // ============================================================================
 
-/**
- * Génère la page d'index HTML avec l'arborescence des projets
- */
-function generateIndexPage(projects) {
+function generateIndexAndConfig(projects) {
+  // Index HTML
   const projectsByChapter = {}
-  projects.forEach(project => {
-    const chapter = project.chapter || 'Autres'
-    if (!projectsByChapter[chapter]) {
-      projectsByChapter[chapter] = []
-    }
-    projectsByChapter[chapter].push(project)
+  projects.forEach(p => {
+    const chapter = p.chapter || 'Autres'
+    if (!projectsByChapter[chapter]) projectsByChapter[chapter] = []
+    projectsByChapter[chapter].push(p)
   })
-  
+
   const html = `<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <title>Arborescence des Projets</title>
+    <title>Three.js Journey - Projets</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        background: #181818;
-        color: #e5e5e5;
-        font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
-        margin: 0;
-        padding: 2rem;
-        line-height: 1.8;
-      }
-      h1 {
-        font-size: 1.7rem;
-        font-weight: 400;
-        margin-bottom: 2rem;
-        letter-spacing: -0.03em;
-        color: #e5e5e5;
-      }
-      .chapters-container {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-        gap: 3rem;
-      }
-      .chapter {
-        display: flex;
-        flex-direction: column;
-      }
-      .chapter-title {
-        font-size: 1.5rem;
-        font-weight: 400;
-        margin-bottom: 1rem;
-        color: #a8ffe6;
-        padding-left: 0;
-      }
-      .projects-list {
-        list-style: none;
-        padding-left: 0;
-        margin: 0;
-      }
-      .projects-list li {
-        margin: 0.5rem 0 0.5rem 1.1em;
-        position: relative;
-      }
-      .projects-list li:before {
-        content: '├──';
-        position: absolute;
-        left: -1.1em;
-        color: #666;
-      }
-      .projects-list li:last-child:before {
-        content: '└──';
-      }
-      a {
-        color: #a8ffe6;
-        text-decoration: none;
-        transition: color 0.15s;
-        margin: 1rem
-      }
-      a:hover {
-        color: #82aaff;
-        text-decoration: underline dotted;
-      }
-      @media (max-width: 768px) {
-        body {
-          padding: 1rem;
-        }
-        h1 {
-          font-size: 1.3rem;
-          margin-bottom: 1.5rem;
-        }
-        .chapters-container {
-          grid-template-columns: 1fr;
-          gap: 2rem;
-        }
-        .chapter-title {
-          font-size: 1.3rem;
-        }
-      }
+      body { background: #181818; color: #e5e5e5; font-family: monospace; padding: 2rem; }
+      h1 { color: #e5e5e5; margin-bottom: 2rem; }
+      .chapter-title { color: #a8ffe6; margin-top: 2rem; }
+      a { color: #a8ffe6; text-decoration: none; }
+      a:hover { color: #82aaff; text-decoration: underline; }
+      ul { list-style: none; padding-left: 1rem; }
+      li { margin: 0.5rem 0; }
+      li:before { content: '├─ '; color: #666; }
     </style>
 </head>
 <body>
-    <h1>Three.js Journey - Projets (${projects.length})</h1>
-    <div class="chapters-container">
-${
-  Object.entries(projectsByChapter).map(([chapter, chapterProjects]) => `
-      <div class="chapter">
+    <h1>Three.js Journey (${projects.length})</h1>
+    ${Object.entries(projectsByChapter).map(([chapter, list]) => `
+      <div>
         <h2 class="chapter-title">${chapter}</h2>
-        <ul class="projects-list">
-${
-  chapterProjects.map(project => `
-          <li><a href="${project.basePath}">${project.name}</a></li>
-`).join('')
-}
-        </ul>
+        <ul>${list.map(p => `<li><a href="${p.basePath}">${p.name}</a></li>`).join('')}</ul>
       </div>
-`).join('')
-}
-    </div>
+    `).join('')}
 </body>
 </html>`
-  
-  if (!existsSync(CONFIG.distDir)) {
-    mkdirSync(CONFIG.distDir, { recursive: true })
-  }
-  
+
   writeFileSync(join(CONFIG.distDir, 'index.html'), html)
-  log(`📄 Page d'index générée`, 'green')
-}
 
-// ============================================================================
-// CONFIGURATION VERCEL
-// ============================================================================
-
-/**
- * Génère le fichier vercel.json pour le déploiement
- */
-function generateVercelConfig(projects) {
+  // Vercel Config
   const routes = []
   const rewrites = []
-  const staticFilePattern = '\\.(js|css|jpg|jpeg|png|gif|svg|webp|ico|woff|woff2|ttf|eot|map|json|hdr|mp4|webm|ogg|mp3|wav|flac|aac)$'
-  
-  for (const project of projects) {
-    const basePathWithSlash = project.basePath
-    const basePathWithoutSlash = basePathWithSlash.replace(/\/$/, '')
-    
-    routes.push({
-      src: `${basePathWithSlash}(.*${staticFilePattern})`,
-      dest: `${basePathWithSlash}$1`,
-      headers: {
-        'Cache-Control': 'public, max-age=31536000, immutable'
-      }
-    })
-    
-    routes.push({
-      src: `${basePathWithSlash}textures/(.*)`,
-      dest: `${basePathWithSlash}textures/$1`,
-      headers: {
-        'Cache-Control': 'public, max-age=31536000, immutable'
-      }
-    })
-    
-    rewrites.push({
-      source: `${basePathWithSlash}:path*`,
-      destination: `${basePathWithSlash}index.html`,
-      has: [{
-        type: 'header',
-        key: 'accept',
-        value: 'text/html',
-      }],
-    })
-    
-    rewrites.push({
-      source: basePathWithoutSlash,
-      destination: `${basePathWithSlash}index.html`,
-      has: [{
-        type: 'header',
-        key: 'accept',
-        value: 'text/html',
-      }],
-    })
-  }
-  
-  routes.push({
-    src: `/(.*${staticFilePattern})`,
-    dest: '/$1',
-    headers: {
-      'Cache-Control': 'public, max-age=31536000, immutable'
-    }
+  const staticExt = 'js|css|jpg|png|svg|webp|ico|json|glb|gltf|bin|mp3'
+
+  projects.forEach(p => {
+    const base = p.basePath
+    const noSlash = base.replace(/\/$/, '')
+
+    routes.push({ src: `${base}(.*\\.(${staticExt}))$`, dest: `${base}$1`, headers: { 'Cache-Control': 'public, max-age=31536000' } })
+    routes.push({ src: `${base}textures/(.*)`, dest: `${base}textures/$1` })
+
+    rewrites.push({ source: `${base}:path*`, destination: `${base}index.html` }) // SPA fallback
+    rewrites.push({ source: noSlash, destination: `${base}index.html` })
   })
-  
-  rewrites.push({
-    source: '/',
-    destination: '/index.html',
-    has: [{
-      type: 'header',
-      key: 'accept',
-      value: 'text/html',
-    }],
-  })
-  
-  const vercelConfig = {
+
+  rewrites.push({ source: '/', destination: '/index.html' })
+
+  writeFileSync(join(__dirname, 'vercel.json'), JSON.stringify({
     version: 2,
     outputDirectory: 'dist',
-    builds: [{
-      src: 'package.json',
-      use: '@vercel/static-build',
-      config: {
-        outputDirectory: 'dist'
-      }
-    }],
-    routes,
-    rewrites
-  }
-  
-  writeFileSync(
-    join(__dirname, 'vercel.json'),
-    JSON.stringify(vercelConfig, null, 2)
-  )
-  
-  log(`📝 vercel.json généré avec ${routes.length} route(s) et ${rewrites.length} rewrite(s)`, 'green')
+    routes, rewrites
+  }, null, 2))
 }
 
 // ============================================================================
-// FONCTIONS PRINCIPALES
+// MAIN
 // ============================================================================
 
-/**
- * Build complet de tous les projets
- */
-async function buildAll() {
-  log('\n🚀 Démarrage du build automatique...\n', 'bright')
-  
-  // Nettoyer le dossier dist
-  if (existsSync(CONFIG.distDir)) {
-    log('🧹 Nettoyage du dossier dist...', 'blue')
-    rmSync(CONFIG.distDir, { recursive: true, force: true })
+async function main() {
+  log('\n🚀 Three.js Journey Build Optimizer\n', 'bright')
+
+  if (HTML_ONLY) {
+    log('Mode: HTML Only', 'blue')
+    const projects = findProjects()
+    if (!existsSync(CONFIG.distDir)) mkdirSync(CONFIG.distDir, { recursive: true })
+    generateIndexAndConfig(projects)
+    log(`✅ Index généré pour ${projects.length} projets`, 'green')
+    return
   }
+
+  // Clean dist
+  if (existsSync(CONFIG.distDir)) rmSync(CONFIG.distDir, { recursive: true, force: true })
   mkdirSync(CONFIG.distDir, { recursive: true })
-  
-  // Détecter les projets
-  log('🔍 Détection des projets...', 'blue')
+
+  // Find projects
   const projects = findProjects()
-  log(`✅ ${projects.length} projet(s) trouvé(s)\n`, 'green')
-  
   if (projects.length === 0) {
-    log('❌ Aucun projet trouvé!', 'red')
+    log('❌ Aucun projet trouvé', 'red')
     process.exit(1)
   }
-  
-  // Afficher la liste
-  projects.forEach(project => {
-    log(`  - ${project.name} (${project.basePath})`, 'blue')
-  })
-  console.log()
-  
-  // Build chaque projet
-  const buildResults = []
-  for (const project of projects) {
-    log(`\n📦 Traitement de ${project.name}...`, 'bright')
-    
-    if (!installDependencies(project)) {
-      log(`⚠️  Passage au projet suivant...`, 'yellow')
-      continue
-    }
-    
-    if (!buildProject(project)) {
-      log(`⚠️  Passage au projet suivant...`, 'yellow')
-      continue
-    }
-    
-    if (copyBuildToGlobalDist(project)) {
-      buildResults.push(project)
-    }
+
+  log(`🎯 ${projects.length} projets trouvés`, 'blue')
+  log(`⚡️ Concurrence: ${CONFIG.concurrency} threads`, 'blue')
+  log(`📦 Cache: ${FORCE_INSTALL ? 'Désactivé (Force)' : 'Activé'}\n`, 'blue')
+
+  const startTime = Date.now()
+
+  // Run builds
+  const results = await runConcurrent(projects, processProject, CONFIG.concurrency)
+
+  // Analyse results
+  const successCount = results.filter(r => r.success).length
+  const failures = results.filter(r => !r.success)
+
+  log('\n' + '='.repeat(50))
+  if (failures.length > 0) {
+    log(`⚠️  ${failures.length} échecs :`, 'yellow')
+    failures.forEach(f => log(`  - ${f.project.name} (${f.step})`, 'red'))
   }
-  
-  // Générer les fichiers finaux
-  generateIndexPage(buildResults)
-  generateVercelConfig(buildResults)
-  createPublicDirectory()
-  
-  log(`\n✅ Build terminé! ${buildResults.length}/${projects.length} projet(s) buildé(s) avec succès\n`, 'green')
-  
-  if (buildResults.length < projects.length) {
-    log(`⚠️  ${projects.length - buildResults.length} projet(s) n'ont pas pu être buildé(s)`, 'yellow')
-  }
+
+  const successfulProjects = results.filter(r => r.success).map(r => r.project)
+  generateIndexAndConfig(successfulProjects)
+
+  // Final Copy for Vercel Public Public
+  if (existsSync(CONFIG.publicDir)) rmSync(CONFIG.publicDir, { recursive: true, force: true })
+  cpSync(CONFIG.distDir, CONFIG.publicDir, { recursive: true })
+
+  const totalTime = ((Date.now() - startTime) / 1000).toFixed(1)
+  log(`\n✨ Terminé en ${totalTime}s`, 'bright')
+  log(`📊 ${successCount}/${projects.length} succès`, successCount === projects.length ? 'green' : 'yellow')
 }
 
-/**
- * Génère uniquement la page HTML (sans builder les projets)
- */
-async function generateHTMLOnly() {
-  log('\n📄 Génération de la page HTML uniquement...\n', 'bright')
-  
-  if (!existsSync(CONFIG.distDir)) {
-    mkdirSync(CONFIG.distDir, { recursive: true })
-  }
-  
-  log('🔍 Détection des projets...', 'blue')
-  const projects = findProjects()
-  log(`✅ ${projects.length} projet(s) trouvé(s)\n`, 'green')
-  
-  if (projects.length === 0) {
-    log('❌ Aucun projet trouvé!', 'red')
-    process.exit(1)
-  }
-  
-  generateIndexPage(projects)
-  
-  log(`\n✅ Page HTML générée dans dist/index.html\n`, 'green')
-  log(`💡 Pour tester: npm run serve\n`, 'blue')
-}
-
-// ============================================================================
-// POINT D'ENTRÉE
-// ============================================================================
-
-const isHTMLOnly = process.argv.includes('--html-only')
-
-if (isHTMLOnly) {
-  generateHTMLOnly().catch(error => {
-    log(`\n❌ Erreur: ${error.message}`, 'red')
-    console.error(error)
-    process.exit(1)
-  })
-} else {
-  buildAll().catch(error => {
-    log(`\n❌ Erreur fatale: ${error.message}`, 'red')
-    console.error(error)
-    process.exit(1)
-  })
-}
+main().catch(err => {
+  console.error(err)
+  process.exit(1)
+})

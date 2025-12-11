@@ -9,7 +9,8 @@
     "html": "node build.js --html-only",
     "serve": "npx serve dist -l 3000",
     "preview": "npm run html && npm run serve",
-    "build:all": "npm run build"
+    "build:all": "npm run build",
+    "clean": "node clean.js"
   },
   "engines": {
     "node": ">=18.0.0"
