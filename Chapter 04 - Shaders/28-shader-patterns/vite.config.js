@@ -4,7 +4,7 @@ import glsl from 'vite-plugin-glsl'
 export default {
     root: 'src/',
     publicDir: '../static/',
-    base: './',
+    base: '/lesson28/',
     server:
     {
         host: true, // Open to local network and display URL
@@ -17,8 +17,8 @@ export default {
         sourcemap: true // Add sourcemap
     },
     plugins:
-    [
-        restart({ restart: [ '../static/**', ] }), // Restart server on static file change
-        glsl() // Handle shader files
-    ]
+        [
+            restart({ restart: ['../static/**',] }), // Restart server on static file change
+            glsl() // Handle shader files
+        ]
 }
